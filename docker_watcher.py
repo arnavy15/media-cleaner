@@ -111,8 +111,7 @@ def is_file_stable(file_path: Path, wait_seconds: int) -> bool:
 
 def clean_file(
     source_file: Path,
-    source_root: Path,
-    dest_root: Path,
+    media_root: Path,
     mkvmerge_bin: str,
     mkvpropedit_bin: str,
     keep_english_only: bool,
@@ -127,8 +126,8 @@ def clean_file(
         return False
 
     selected_audio = pick_audio_track(audios, english_audios, keep_english_only)
-    rel_path = source_file.relative_to(source_root)
-    dest_file = (dest_root / rel_path).with_suffix(".mkv")
+    rel_path = source_file.relative_to(media_root)
+    dest_file = (media_root / rel_path).with_suffix(".mkv")
     is_in_place_target = source_file == dest_file
     dest_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -207,29 +206,27 @@ def find_media_files(root: Path) -> list[Path]:
 
 
 def main() -> int:
-    source_root = Path(os.environ.get("SOURCE_DIR", "/watch")).resolve()
-    dest_root = Path(os.environ.get("DEST_DIR", "/output")).resolve()
+    media_root = Path(os.environ.get("MEDIA_DIR", "/data")).resolve()
     config_root = Path(os.environ.get("CONFIG_DIR", "/config")).resolve()
     poll_seconds = int(os.environ.get("POLL_SECONDS", "15"))
     stable_wait_seconds = int(os.environ.get("STABLE_WAIT_SECONDS", "5"))
     keep_english_only = env_bool("KEEP_ENGLISH_ONLY", True)
     overwrite = env_bool("OVERWRITE_OUTPUT", False)
 
-    if not source_root.exists():
-        print(f"[FATAL] SOURCE_DIR does not exist: {source_root}")
+    if not media_root.exists():
+        print(f"[FATAL] MEDIA_DIR does not exist: {media_root}")
         return 1
     config_root.mkdir(parents=True, exist_ok=True)
-    dest_root.mkdir(parents=True, exist_ok=True)
+    media_root.mkdir(parents=True, exist_ok=True)
 
     mkvmerge_bin, mkvpropedit_bin = resolve_tools()
-    print(f"[START] Watching: {source_root}")
-    print(f"[START] Output:   {dest_root}")
+    print(f"[START] Media:    {media_root}")
     print(f"[START] Config:   {config_root}")
     print(f"[START] Poll:     {poll_seconds}s")
 
     while True:
         try:
-            media_files = find_media_files(source_root)
+            media_files = find_media_files(media_root)
             if media_files:
                 print(f"[SCAN] Found {len(media_files)} candidate file(s).")
             for file_path in media_files:
@@ -241,8 +238,7 @@ def main() -> int:
                 try:
                     clean_file(
                         source_file=file_path,
-                        source_root=source_root,
-                        dest_root=dest_root,
+                        media_root=media_root,
                         mkvmerge_bin=mkvmerge_bin,
                         mkvpropedit_bin=mkvpropedit_bin,
                         keep_english_only=keep_english_only,

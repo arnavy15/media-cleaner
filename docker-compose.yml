@@ -6,8 +6,7 @@ services:
     container_name: media-cleaner-movies
     restart: unless-stopped
     environment:
-      SOURCE_DIR: /data/movies
-      DEST_DIR: /data/movies
+      MEDIA_DIR: /data/movies
       POLL_SECONDS: "15"
       STABLE_WAIT_SECONDS: "5"
       KEEP_ENGLISH_ONLY: "true"
@@ -22,8 +21,7 @@ services:
     container_name: media-cleaner-tv
     restart: unless-stopped
     environment:
-      SOURCE_DIR: /data/tv
-      DEST_DIR: /data/tv
+      MEDIA_DIR: /data/tv
       POLL_SECONDS: "15"
       STABLE_WAIT_SECONDS: "5"
       KEEP_ENGLISH_ONLY: "true"
