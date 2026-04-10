@@ -26,6 +26,7 @@ MEDIA_EXTENSIONS = {
 }
 
 ENGLISH_LANGUAGE_TAGS = {"eng", "en", "english", "en-us", "en-gb", "enus", "eng-us", "eng-gb"}
+STATE_FILE_NAME = "processed_state.json"
 
 
 def env_bool(name: str, default: bool) -> bool:
@@ -38,6 +39,34 @@ def env_bool(name: str, default: bool) -> bool:
 def run_command(cmd: list[str]) -> tuple[int, str, str]:
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     return proc.returncode, proc.stdout, proc.stderr
+
+
+def load_state(state_path: Path) -> dict[str, dict[str, int]]:
+    if not state_path.exists():
+        return {}
+    try:
+        with state_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return {str(k): v for k, v in data.items() if isinstance(v, dict)}
+    except Exception:
+        pass
+    return {}
+
+
+def save_state(state_path: Path, state: dict[str, dict[str, int]]) -> None:
+    tmp_path = state_path.with_suffix(".tmp")
+    with tmp_path.open("w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2, sort_keys=True)
+    os.replace(tmp_path, state_path)
+
+
+def file_signature(path: Path) -> dict[str, int] | None:
+    try:
+        st = path.stat()
+        return {"size": int(st.st_size), "mtime_ns": int(st.st_mtime_ns)}
+    except OSError:
+        return None
 
 
 def resolve_tools() -> tuple[str, str]:
@@ -212,12 +241,14 @@ def main() -> int:
     stable_wait_seconds = int(os.environ.get("STABLE_WAIT_SECONDS", "5"))
     keep_english_only = env_bool("KEEP_ENGLISH_ONLY", True)
     overwrite = env_bool("OVERWRITE_OUTPUT", False)
+    state_path = config_root / STATE_FILE_NAME
 
     if not media_root.exists():
         print(f"[FATAL] MEDIA_DIR does not exist: {media_root}")
         return 1
     config_root.mkdir(parents=True, exist_ok=True)
     media_root.mkdir(parents=True, exist_ok=True)
+    processed_state = load_state(state_path)
 
     mkvmerge_bin, mkvpropedit_bin = resolve_tools()
     print(f"[START] Media:    {media_root}")
@@ -232,11 +263,15 @@ def main() -> int:
             for file_path in media_files:
                 if not file_path.exists():
                     continue
+                rel_key = str(file_path.relative_to(media_root).as_posix())
+                current_sig = file_signature(file_path)
+                if current_sig is not None and processed_state.get(rel_key) == current_sig:
+                    continue
                 if not is_file_stable(file_path, stable_wait_seconds):
                     print(f"[WAIT] Still changing: {file_path}")
                     continue
                 try:
-                    clean_file(
+                    ok = clean_file(
                         source_file=file_path,
                         media_root=media_root,
                         mkvmerge_bin=mkvmerge_bin,
@@ -244,6 +279,13 @@ def main() -> int:
                         keep_english_only=keep_english_only,
                         overwrite=overwrite,
                     )
+                    if ok:
+                        final_sig = file_signature(file_path.with_suffix(".mkv"))
+                        if final_sig is not None:
+                            processed_state[rel_key.rsplit(".", 1)[0] + ".mkv"] = final_sig
+                            if rel_key != rel_key.rsplit(".", 1)[0] + ".mkv":
+                                processed_state.pop(rel_key, None)
+                            save_state(state_path, processed_state)
                 except Exception as exc:
                     print(f"[ERROR] Unexpected failure for {file_path}: {exc}")
             time.sleep(poll_seconds)
