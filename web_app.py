@@ -44,6 +44,18 @@ MOVIES_OUTPUT_DIRNAME = "Movies"
 TV_OUTPUT_DIRNAME = "TV Shows"
 DEFAULT_OVERWRITE = False
 
+
+def load_app_version() -> str:
+    version_path = Path(__file__).with_name("VERSION")
+    try:
+        raw = version_path.read_text(encoding="utf-8").strip()
+        return raw or "0.0.0"
+    except OSError:
+        return "0.0.0"
+
+
+APP_VERSION = load_app_version()
+
 app = Flask(__name__)
 
 JOBS: dict[str, dict] = {}
@@ -211,7 +223,7 @@ PAGE_TEMPLATE = """
     <div class="hero">
       <h1>Media Cleaner Control Panel</h1>
       <p>Download, clean, and route files with live streaming logs.</p>
-      <span class="chip">MKVToolNix Only</span>
+      <span class="chip">v{{ app_version }} · MKVToolNix Only</span>
     </div>
     <div class="card">
       <h2>Pipeline Settings</h2>
@@ -792,7 +804,12 @@ def sse_event(data: str, event: str | None = None) -> str:
 
 @app.get("/")
 def index():
-    return render_template_string(PAGE_TEMPLATE, overwrite=DEFAULT_OVERWRITE)
+    return render_template_string(PAGE_TEMPLATE, overwrite=DEFAULT_OVERWRITE, app_version=APP_VERSION)
+
+
+@app.get("/version")
+def version():
+    return jsonify({"version": APP_VERSION})
 
 
 @app.post("/start")

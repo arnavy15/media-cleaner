@@ -2,7 +2,7 @@ version: "3.9"
 
 services:
   media-cleaner-web:
-    image: ghcr.io/arnavy15/media-cleaner:latest
+    image: ghcr.io/arnavy15/media-cleaner:1.0.0
     container_name: media-cleaner-web
     restart: unless-stopped
     ports:
