@@ -193,18 +193,42 @@ PAGE_TEMPLATE = """
     }
     button:hover { transform: translateY(-1px); }
     button[disabled] { opacity: 0.6; cursor: not-allowed; }
-    pre {
-      margin: 14px 0 0;
+    .progress-panel {
+      margin-top: 14px;
       border: 1px solid var(--border);
       border-radius: 14px;
       padding: 13px;
-      max-height: 420px;
-      overflow: auto;
       background: rgba(2, 6, 23, 0.65);
-      white-space: pre-wrap;
-      line-height: 1.42;
-      color: #cfe2ff;
-      font-size: 0.9rem;
+    }
+    .progress-row { margin-bottom: 12px; }
+    .progress-row:last-child { margin-bottom: 0; }
+    .progress-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 7px;
+      font-size: 0.88rem;
+      color: #cbd5e1;
+    }
+    .progress-meta { color: #93c5fd; font-weight: 600; font-size: 0.8rem; }
+    .bar {
+      width: 100%;
+      height: 12px;
+      border-radius: 999px;
+      background: rgba(148, 163, 184, 0.2);
+      overflow: hidden;
+      border: 1px solid rgba(148, 163, 184, 0.25);
+    }
+    .bar-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #38bdf8, #22c55e);
+      transition: width 0.2s ease;
+    }
+    .status-line {
+      margin-top: 8px;
+      font-size: 0.86rem;
+      color: #9fb0ca;
     }
     .subnote {
       color: var(--muted);
@@ -222,7 +246,7 @@ PAGE_TEMPLATE = """
   <div class="wrap">
     <div class="hero">
       <h1>Media Cleaner Control Panel</h1>
-      <p>Download, clean, and route files with live streaming logs.</p>
+      <p>Download, clean, and route files with live progress tracking.</p>
       <span class="chip">v{{ app_version }} · MKVToolNix Only</span>
     </div>
     <div class="card">
@@ -266,21 +290,58 @@ PAGE_TEMPLATE = """
         </div>
         <div class="subnote">Volumes: <code>/download</code> for input and <code>/media</code> for cleaned output.</div>
       </form>
-      <pre id="logs">Waiting...</pre>
+      <div class="progress-panel">
+        <div class="progress-row">
+          <div class="progress-head">
+            <span>Overall Progress</span>
+            <span id="overall-meta" class="progress-meta">0%</span>
+          </div>
+          <div class="bar"><div id="overall-bar" class="bar-fill"></div></div>
+        </div>
+        <div id="download-row" class="progress-row" style="display:none;">
+          <div class="progress-head">
+            <span id="download-label">Download Progress</span>
+            <span id="download-meta" class="progress-meta">0%</span>
+          </div>
+          <div class="bar"><div id="download-bar" class="bar-fill"></div></div>
+        </div>
+        <div id="status-line" class="status-line">Ready.</div>
+      </div>
     </div>
   </div>
   <script>
     const form = document.getElementById("pipeline-form");
-    const logs = document.getElementById("logs");
     const runBtn = document.getElementById("run-btn");
     const downloadType = document.getElementById("download_type");
     const movieNameWrap = document.getElementById("movie-name-wrap");
     const tvDestWrap = document.getElementById("tv-dest-wrap");
+    const overallBar = document.getElementById("overall-bar");
+    const overallMeta = document.getElementById("overall-meta");
+    const downloadRow = document.getElementById("download-row");
+    const downloadBar = document.getElementById("download-bar");
+    const downloadMeta = document.getElementById("download-meta");
+    const downloadLabel = document.getElementById("download-label");
+    const statusLine = document.getElementById("status-line");
     let stream = null;
 
-    function appendLog(line) {
-      logs.textContent += (logs.textContent === "Waiting..." ? "" : "\\n") + line;
-      logs.scrollTop = logs.scrollHeight;
+    function setOverall(percent, text) {
+      const clamped = Math.max(0, Math.min(100, Number(percent || 0)));
+      overallBar.style.width = clamped + "%";
+      overallMeta.textContent = clamped.toFixed(0) + "%";
+      if (text) statusLine.textContent = text;
+    }
+
+    function setDownload(payload) {
+      downloadRow.style.display = "block";
+      const clamped = Math.max(0, Math.min(100, Number(payload.percent || 0)));
+      downloadBar.style.width = clamped + "%";
+      downloadMeta.textContent = clamped.toFixed(0) + "%";
+      if (payload.filename) downloadLabel.textContent = "Downloading: " + payload.filename;
+      if (payload.status) statusLine.textContent = payload.status;
+    }
+
+    function hideDownload() {
+      downloadRow.style.display = "none";
     }
 
     function refreshDownloadFields() {
@@ -301,7 +362,8 @@ PAGE_TEMPLATE = """
         stream.close();
         stream = null;
       }
-      logs.textContent = "";
+      setOverall(0, "Starting...");
+      hideDownload();
       runBtn.disabled = true;
       runBtn.textContent = "Running...";
 
@@ -311,7 +373,7 @@ PAGE_TEMPLATE = """
           body: new FormData(form),
         });
         if (!response.ok) {
-          appendLog("[FATAL] Failed to start job.");
+          statusLine.textContent = "Failed to start job.";
           runBtn.disabled = false;
           runBtn.textContent = "Run Pipeline";
           return;
@@ -319,16 +381,28 @@ PAGE_TEMPLATE = """
 
         const payload = await response.json();
         if (!payload.job_id) {
-          appendLog("[FATAL] Missing job id.");
+          statusLine.textContent = "Missing job id.";
           runBtn.disabled = false;
           runBtn.textContent = "Run Pipeline";
           return;
         }
 
         stream = new EventSource(`/stream/${payload.job_id}`);
-        stream.onmessage = (evt) => appendLog(evt.data);
+        stream.addEventListener("status", (evt) => {
+          const data = JSON.parse(evt.data || "{}");
+          if (data.message) statusLine.textContent = data.message;
+        });
+        stream.addEventListener("overall_progress", (evt) => {
+          const data = JSON.parse(evt.data || "{}");
+          setOverall(data.percent || 0, data.status || "");
+        });
+        stream.addEventListener("download_progress", (evt) => {
+          const data = JSON.parse(evt.data || "{}");
+          setDownload(data);
+        });
         stream.addEventListener("done", () => {
-          appendLog("[UI] Job complete.");
+          setOverall(100, "Pipeline complete.");
+          hideDownload();
           runBtn.disabled = false;
           runBtn.textContent = "Run Pipeline";
           if (stream) {
@@ -337,7 +411,7 @@ PAGE_TEMPLATE = """
           }
         });
         stream.onerror = () => {
-          appendLog("[UI] Stream disconnected.");
+          statusLine.textContent = "Stream disconnected.";
           runBtn.disabled = false;
           runBtn.textContent = "Run Pipeline";
           if (stream) {
@@ -346,7 +420,7 @@ PAGE_TEMPLATE = """
           }
         };
       } catch (err) {
-        appendLog("[FATAL] " + err);
+        statusLine.textContent = String(err);
         runBtn.disabled = false;
         runBtn.textContent = "Run Pipeline";
       }
@@ -573,20 +647,60 @@ def normalized_final_name(name: str, fallback_stem: str, fallback_suffix: str) -
     return clean_name
 
 
-def download_to_input(download_url: str, input_dir: Path, log: Callable[[str], None]) -> Path:
+def format_bytes(num_bytes: int) -> str:
+    units = ["B", "KB", "MB", "GB", "TB"]
+    value = float(num_bytes)
+    for unit in units:
+        if value < 1024.0 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024.0
+    return f"{num_bytes} B"
+
+
+def download_to_input(
+    download_url: str,
+    input_dir: Path,
+    status: Callable[[str], None],
+    download_progress: Callable[[dict], None],
+) -> Path:
     final_name = safe_download_filename(download_url)
     destination = input_dir / final_name
     destination.parent.mkdir(parents=True, exist_ok=True)
 
-    log(f"[DOWNLOAD] Starting: {download_url}")
+    status(f"Starting download: {final_name}")
     try:
         with urllib.request.urlopen(download_url, timeout=120) as response, destination.open("wb") as out_file:
+            total_raw = response.headers.get("Content-Length")
+            total = int(total_raw) if total_raw and total_raw.isdigit() else 0
+            downloaded = 0
+            download_progress({
+                "percent": 0,
+                "filename": destination.name,
+                "status": "Download started",
+            })
             while True:
                 chunk = response.read(1024 * 1024)
                 if not chunk:
                     break
                 out_file.write(chunk)
-        log(f"[DOWNLOAD] Saved to: {destination}")
+                downloaded += len(chunk)
+                percent = (downloaded / total * 100.0) if total > 0 else 0.0
+                status_text = f"{format_bytes(downloaded)} downloaded"
+                if total > 0:
+                    status_text = f"{format_bytes(downloaded)} / {format_bytes(total)}"
+                download_progress({
+                    "percent": percent,
+                    "filename": destination.name,
+                    "status": status_text,
+                })
+        download_progress({
+            "percent": 100,
+            "filename": destination.name,
+            "status": "Download complete",
+        })
+        status(f"Download complete: {destination.name}")
         return destination
     except OSError as exc:
         if exc.errno != errno.ENAMETOOLONG:
@@ -594,14 +708,37 @@ def download_to_input(download_url: str, input_dir: Path, log: Callable[[str], N
         url_hash = hashlib.sha1(download_url.encode("utf-8")).hexdigest()[:12]
         short_name = f"download_{url_hash}.bin"
         destination = input_dir / short_name
-        log(f"[DOWNLOAD] Filename too long; retrying as: {short_name}")
+        status(f"Filename too long, retrying as: {short_name}")
         with urllib.request.urlopen(download_url, timeout=120) as response, destination.open("wb") as out_file:
+            total_raw = response.headers.get("Content-Length")
+            total = int(total_raw) if total_raw and total_raw.isdigit() else 0
+            downloaded = 0
+            download_progress({
+                "percent": 0,
+                "filename": destination.name,
+                "status": "Download restarted",
+            })
             while True:
                 chunk = response.read(1024 * 1024)
                 if not chunk:
                     break
                 out_file.write(chunk)
-        log(f"[DOWNLOAD] Saved to: {destination}")
+                downloaded += len(chunk)
+                percent = (downloaded / total * 100.0) if total > 0 else 0.0
+                status_text = f"{format_bytes(downloaded)} downloaded"
+                if total > 0:
+                    status_text = f"{format_bytes(downloaded)} / {format_bytes(total)}"
+                download_progress({
+                    "percent": percent,
+                    "filename": destination.name,
+                    "status": status_text,
+                })
+        download_progress({
+            "percent": 100,
+            "filename": destination.name,
+            "status": "Download complete",
+        })
+        status(f"Download complete: {destination.name}")
         return destination
 
 
@@ -630,7 +767,12 @@ def resolve_tv_destination(tv_base_root: Path, subfolder: str) -> Path:
     return resolve_output_subfolder(tv_base_root, clean_subfolder)
 
 
-def run_pipeline(params: dict[str, object], log: Callable[[str], None]) -> None:
+def run_pipeline(
+    params: dict[str, object],
+    status: Callable[[str], None],
+    overall_progress: Callable[[float, str], None],
+    download_progress: Callable[[dict], None],
+) -> None:
     input_root = Path(DEFAULT_DOWNLOAD_DIR).resolve()
     media_root = Path(DEFAULT_MEDIA_DIR).resolve()
     download_type = str(params["download_type"])
@@ -648,17 +790,15 @@ def run_pipeline(params: dict[str, object], log: Callable[[str], None]) -> None:
     movies_output_root.mkdir(parents=True, exist_ok=True)
     tv_output_root.mkdir(parents=True, exist_ok=True)
 
-    log(f"[START] Download type: {download_type}")
-    log(f"[START] Download/input root: {input_root}")
-    log(f"[START] Media/output root: {media_root}")
-    log(f"[START] Movies output: {movies_output_root}")
-    log(f"[START] TV output: {tv_output_root}")
+    overall_progress(2, "Preparing pipeline")
+    status("Pipeline started")
 
     downloaded_file: Path | None = None
     downloaded_movie_override: Path | None = None
     downloaded_tv_override_root: Path | None = None
     if download_url:
-        downloaded_file = download_to_input(download_url, input_root, log)
+        overall_progress(5, "Downloading input")
+        downloaded_file = download_to_input(download_url, input_root, status, download_progress)
         if download_type == "movie":
             final_name = normalized_final_name(
                 name=movie_final_name,
@@ -666,61 +806,36 @@ def run_pipeline(params: dict[str, object], log: Callable[[str], None]) -> None:
                 fallback_suffix=downloaded_file.suffix or ".mkv",
             )
             downloaded_movie_override = movies_output_root / final_name
-            log(f"[DOWNLOAD] Movie final output name: {downloaded_movie_override}")
+            status(f"Movie final output name: {downloaded_movie_override.name}")
         elif download_type == "tv":
             downloaded_tv_override_root = tv_output_root
-            log(f"[DOWNLOAD] TV output destination: {downloaded_tv_override_root}")
+            status(f"TV destination: {downloaded_tv_override_root}")
+        overall_progress(25, "Download completed")
+    else:
+        overall_progress(20, "No download selected")
 
     mkvmerge_bin, mkvpropedit_bin = resolve_tools()
     total = 0
     cleaned = 0
     skipped = 0
+    processed = 0
+
+    files_to_process: list[tuple[Path, Path, Path, Path | None]] = []
 
     if download_type == "movie":
-        log("[MOVIES] Scanning media files from input folder.")
+        status("Scanning movie files")
         movie_files = find_media_files(input_root)
-        if not movie_files:
-            log("[MOVIES] No media files found.")
         for media_file in movie_files:
-            total += 1
-            ok = clean_file_to_output(
-                source_file=media_file,
-                source_root=input_root,
-                output_root=movies_output_root,
-                mkvmerge_bin=mkvmerge_bin,
-                mkvpropedit_bin=mkvpropedit_bin,
-                overwrite=overwrite,
-                delete_after_clean=delete_after_clean,
-                output_override_file=downloaded_movie_override if downloaded_file and media_file.resolve() == downloaded_file.resolve() else None,
-                log=log,
-            )
-            if ok:
-                cleaned += 1
-            else:
-                skipped += 1
+            override = downloaded_movie_override if downloaded_file and media_file.resolve() == downloaded_file.resolve() else None
+            files_to_process.append((media_file, input_root, movies_output_root, override))
 
     if download_type == "tv":
         if downloaded_file and downloaded_file.suffix.lower() in MEDIA_EXTENSIONS:
-            log("[TV] Downloaded TV item is a single media file (episode).")
-            total += 1
-            ok = clean_file_to_output(
-                source_file=downloaded_file,
-                source_root=downloaded_file.parent,
-                output_root=downloaded_tv_override_root or tv_output_root,
-                mkvmerge_bin=mkvmerge_bin,
-                mkvpropedit_bin=mkvpropedit_bin,
-                overwrite=overwrite,
-                delete_after_clean=delete_after_clean,
-                output_override_file=None,
-                log=log,
-            )
-            if ok:
-                cleaned += 1
-            else:
-                skipped += 1
+            status("Downloaded TV item is a single episode file")
+            files_to_process.append((downloaded_file, downloaded_file.parent, downloaded_tv_override_root or tv_output_root, None))
         else:
-            log("[TV] Extracting season ZIP files (if any), then scanning TV files.")
-            extracted = extract_tv_zips(input_root, log)
+            status("Extracting TV ZIP files (if present)")
+            extracted = extract_tv_zips(input_root, status)
             tv_root_targets: list[tuple[Path, Path]] = []
             if extracted:
                 for zip_path, season_root in extracted:
@@ -732,40 +847,47 @@ def run_pipeline(params: dict[str, object], log: Callable[[str], None]) -> None:
                 tv_root_targets.append((input_root, downloaded_tv_override_root or tv_output_root))
 
             for season_root, root_target in tv_root_targets:
-                log(f"[TV] Scanning extracted season: {season_root}")
                 season_files = find_media_files(season_root)
-                if not season_files:
-                    log(f"[TV] No media files found in {season_root}")
-                    continue
                 for media_file in season_files:
-                    total += 1
-                    ok = clean_file_to_output(
-                        source_file=media_file,
-                        source_root=season_root,
-                        output_root=root_target,
-                        mkvmerge_bin=mkvmerge_bin,
-                        mkvpropedit_bin=mkvpropedit_bin,
-                        overwrite=overwrite,
-                        delete_after_clean=delete_after_clean,
-                        output_override_file=None,
-                        log=log,
-                    )
-                    if ok:
-                        cleaned += 1
-                    else:
-                        skipped += 1
+                    files_to_process.append((media_file, season_root, root_target, None))
 
-    log(f"[SUMMARY] Total files seen: {total}")
-    log(f"[SUMMARY] Cleaned: {cleaned}")
-    log(f"[SUMMARY] Skipped/Failed: {skipped}")
+    total = len(files_to_process)
+    if total == 0:
+        overall_progress(100, "No media files found")
+        status("No media files found to clean")
+        return
+
+    overall_progress(30, f"Processing {total} file(s)")
+    for media_file, source_root, target_root, override in files_to_process:
+        status(f"Cleaning: {media_file.name}")
+        ok = clean_file_to_output(
+            source_file=media_file,
+            source_root=source_root,
+            output_root=target_root,
+            mkvmerge_bin=mkvmerge_bin,
+            mkvpropedit_bin=mkvpropedit_bin,
+            overwrite=overwrite,
+            delete_after_clean=delete_after_clean,
+            output_override_file=override,
+            log=status,
+        )
+        processed += 1
+        if ok:
+            cleaned += 1
+        else:
+            skipped += 1
+        progress = 30.0 + (processed / total) * 70.0
+        overall_progress(progress, f"Processed {processed}/{total}")
+
+    status(f"Done. Cleaned: {cleaned}, Skipped/Failed: {skipped}")
 
 
-def emit_log(job_id: str, message: str) -> None:
+def emit_event(job_id: str, event_name: str, payload: dict) -> None:
     with JOBS_LOCK:
         job = JOBS.get(job_id)
     if not job:
         return
-    job["queue"].put(message)
+    job["queue"].put((event_name, payload))
 
 
 def mark_done(job_id: str) -> None:
@@ -774,29 +896,34 @@ def mark_done(job_id: str) -> None:
         if not job:
             return
         job["done"] = True
-    job["queue"].put("[DONE]")
+    job["queue"].put(("done", {"message": "Pipeline complete."}))
 
 
 def job_runner(job_id: str, params: dict[str, object]) -> None:
-    def log(message: str) -> None:
-        emit_log(job_id, message)
+    def status(message: str) -> None:
+        emit_event(job_id, "status", {"message": message})
+
+    def overall_progress(percent: float, message: str) -> None:
+        emit_event(job_id, "overall_progress", {"percent": max(0.0, min(100.0, percent)), "status": message})
+
+    def download_progress(payload: dict) -> None:
+        emit_event(job_id, "download_progress", payload)
 
     try:
-        run_pipeline(params, log)
+        run_pipeline(params, status, overall_progress, download_progress)
     except Exception:
-        log("[FATAL] Unhandled exception:")
-        for line in traceback.format_exc().splitlines():
-            log(line)
+        emit_event(job_id, "status", {"message": "Unhandled exception occurred."})
+        emit_event(job_id, "status", {"message": traceback.format_exc()})
     finally:
         mark_done(job_id)
 
 
-def sse_event(data: str, event: str | None = None) -> str:
+def sse_event(payload: dict, event: str) -> str:
+    data = json.dumps(payload, ensure_ascii=False)
     safe_data = data.replace("\r", "")
     lines = safe_data.split("\n")
     parts: list[str] = []
-    if event:
-        parts.append(f"event: {event}")
+    parts.append(f"event: {event}")
     for line in lines:
         parts.append(f"data: {line}")
     return "\n".join(parts) + "\n\n"
@@ -848,11 +975,11 @@ def stream(job_id: str):
     def generate():
         q: queue.Queue = job["queue"]
         while True:
-            message = q.get()
-            if message == "[DONE]":
-                yield sse_event("Pipeline complete.", event="done")
+            event_name, payload = q.get()
+            if event_name == "done":
+                yield sse_event(payload, event="done")
                 break
-            yield sse_event(message)
+            yield sse_event(payload, event=event_name)
 
         with JOBS_LOCK:
             JOBS.pop(job_id, None)
