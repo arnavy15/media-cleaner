@@ -4,10 +4,15 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends mkvtoolnix inotify-tools ca-certificates \
+    && apt-get install -y --no-install-recommends mkvtoolnix ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY docker_watcher.py /app/docker_watcher.py
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
-CMD ["python", "/app/docker_watcher.py"]
+COPY web_app.py /app/web_app.py
+
+EXPOSE 5050
+
+CMD ["python", "/app/web_app.py"]

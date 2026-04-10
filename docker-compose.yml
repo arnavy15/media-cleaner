@@ -1,30 +1,13 @@
 version: "3.9"
 
 services:
-  media-cleaner-movies:
+  media-cleaner-web:
     image: ghcr.io/arnavy15/media-cleaner:latest
-    container_name: media-cleaner-movies
+    container_name: media-cleaner-web
     restart: unless-stopped
-    environment:
-      MEDIA_DIR: /data/movies
-      STABLE_WAIT_SECONDS: "5"
-      KEEP_ENGLISH_ONLY: "true"
-      OVERWRITE_OUTPUT: "false"
-      CONFIG_DIR: /config/movies
+    ports:
+      - "5050:5050"
     volumes:
       - /your/server/config:/config
-      - /your/server/data:/data
-
-  media-cleaner-tv:
-    image: ghcr.io/arnavy15/media-cleaner:latest
-    container_name: media-cleaner-tv
-    restart: unless-stopped
-    environment:
-      MEDIA_DIR: /data/tv
-      STABLE_WAIT_SECONDS: "5"
-      KEEP_ENGLISH_ONLY: "true"
-      OVERWRITE_OUTPUT: "false"
-      CONFIG_DIR: /config/tv
-    volumes:
-      - /your/server/config:/config
-      - /your/server/data:/data
+      - /your/server/download:/download
+      - /your/server/media:/media
