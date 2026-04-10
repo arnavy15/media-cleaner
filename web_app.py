@@ -13,6 +13,9 @@ import urllib.parse
 import urllib.request
 import uuid
 import zipfile
+import hashlib
+import re
+import errno
 from pathlib import Path
 from typing import Callable
 
@@ -37,6 +40,8 @@ ENGLISH_LANGUAGE_TAGS = {"eng", "en", "english", "en-us", "en-gb", "enus", "eng-
 
 DEFAULT_DOWNLOAD_DIR = "/download"
 DEFAULT_MEDIA_DIR = "/media"
+MOVIES_OUTPUT_DIRNAME = "Movies"
+TV_OUTPUT_DIRNAME = "TV Shows"
 DEFAULT_OVERWRITE = False
 
 app = Flask(__name__)
@@ -213,11 +218,10 @@ PAGE_TEMPLATE = """
       <form id="pipeline-form">
         <div class="grid">
           <div>
-            <label for="mode">Mode</label>
-            <select id="mode" name="mode">
-              <option value="movies">Movies</option>
-              <option value="tv">TV Shows</option>
-              <option value="both">Both</option>
+            <label for="download_type">Download Type</label>
+            <select id="download_type" name="download_type">
+              <option value="movie">Movie</option>
+              <option value="tv">TV Show</option>
             </select>
           </div>
           <div>
@@ -228,35 +232,17 @@ PAGE_TEMPLATE = """
             </select>
           </div>
           <div class="full">
-            <label for="movies_subfolder">Movies Subfolder (inside /media)</label>
-            <input id="movies_subfolder" name="movies_subfolder" value="movies" required />
-          </div>
-          <div class="full">
-            <label for="tv_subfolder">TV Subfolder (inside /media)</label>
-            <input id="tv_subfolder" name="tv_subfolder" value="tv" required />
-          </div>
-          <div class="full">
             <label for="download_url">Download URL (optional)</label>
             <input id="download_url" name="download_url" value="" placeholder="https://..." />
           </div>
-          <div class="full">
-            <label for="download_name">Download File Name (optional)</label>
-            <input id="download_name" name="download_name" value="" placeholder="movie.mkv or season1.zip" />
-          </div>
-          <div class="full">
-            <label for="download_type">Downloaded Item Type</label>
-            <select id="download_type" name="download_type">
-              <option value="movie">Movie</option>
-              <option value="tv">TV Show</option>
-            </select>
-          </div>
           <div class="full" id="movie-name-wrap">
-            <label for="movie_final_name">Movie Final File Name (inside movies output)</label>
-            <input id="movie_final_name" name="movie_final_name" value="" placeholder="Movie Title (2026).mkv" />
+            <label for="movie_final_name">Movie Final File Name (inside /media/Movies)</label>
+            <input id="movie_final_name" name="movie_final_name" value="" placeholder="Movie Title (2026)" />
+            <div class="subnote">No extension needed. Original extension is reused.</div>
           </div>
           <div class="full" id="tv-dest-wrap" style="display:none;">
-            <label for="tv_download_subfolder">TV Download Destination (inside /media)</label>
-            <input id="tv_download_subfolder" name="tv_download_subfolder" value="" placeholder="TV/Show Name/Season 01" />
+            <label for="tv_download_subfolder">TV Download Destination (inside /media/TV Shows)</label>
+            <input id="tv_download_subfolder" name="tv_download_subfolder" value="" placeholder="Show Name/Season 01" />
           </div>
           <div class="full check">
             <input type="checkbox" id="delete_after_clean" name="delete_after_clean" />
@@ -440,7 +426,7 @@ def clean_file_to_output(
         return False
 
     if output_override_file is not None:
-        dest_file = output_override_file.with_suffix(".mkv")
+        dest_file = output_override_file
     else:
         rel_path = source_file.relative_to(source_root)
         dest_file = (output_root / rel_path).with_suffix(".mkv")
@@ -549,36 +535,62 @@ def find_media_files(root: Path, skip_dirs: set[Path] | None = None) -> list[Pat
     return files
 
 
-def normalized_filename(name: str, fallback_name: str) -> str:
-    clean_name = Path(name.strip()).name
-    if not clean_name or clean_name in {".", ".."}:
-        return fallback_name
-    return clean_name
+def safe_download_filename(download_url: str) -> str:
+    parsed = urllib.parse.urlparse(download_url)
+    raw_path_name = Path(parsed.path).name
+    inferred_suffix = Path(raw_path_name).suffix
+    candidate = raw_path_name or "downloaded_media"
+    candidate = re.sub(r"[^A-Za-z0-9._\- ()\[\]]+", "_", candidate).strip(" .")
+    if not candidate:
+        candidate = "downloaded_media"
+
+    suffix = Path(candidate).suffix.lower()
+    if len(candidate) > 120:
+        url_hash = hashlib.sha1(download_url.encode("utf-8")).hexdigest()[:12]
+        ext = suffix if suffix and len(suffix) <= 10 else (inferred_suffix if len(inferred_suffix) <= 10 else "")
+        candidate = f"download_{url_hash}{ext}"
+    return candidate
 
 
-def normalized_final_mkv_name(name: str, fallback_stem: str) -> str:
+def normalized_final_name(name: str, fallback_stem: str, fallback_suffix: str) -> str:
     clean_name = Path(name.strip()).name
     if not clean_name or clean_name in {".", ".."}:
         clean_name = fallback_stem
-    return str(Path(clean_name).with_suffix(".mkv"))
+    if not Path(clean_name).suffix:
+        clean_name = f"{clean_name}{fallback_suffix}"
+    return clean_name
 
 
-def download_to_input(download_url: str, download_name: str, input_dir: Path, log: Callable[[str], None]) -> Path:
-    parsed = urllib.parse.urlparse(download_url)
-    fallback_name = Path(parsed.path).name or "downloaded_media"
-    final_name = normalized_filename(download_name, fallback_name)
+def download_to_input(download_url: str, input_dir: Path, log: Callable[[str], None]) -> Path:
+    final_name = safe_download_filename(download_url)
     destination = input_dir / final_name
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     log(f"[DOWNLOAD] Starting: {download_url}")
-    with urllib.request.urlopen(download_url, timeout=120) as response, destination.open("wb") as out_file:
-        while True:
-            chunk = response.read(1024 * 1024)
-            if not chunk:
-                break
-            out_file.write(chunk)
-    log(f"[DOWNLOAD] Saved to: {destination}")
-    return destination
+    try:
+        with urllib.request.urlopen(download_url, timeout=120) as response, destination.open("wb") as out_file:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                out_file.write(chunk)
+        log(f"[DOWNLOAD] Saved to: {destination}")
+        return destination
+    except OSError as exc:
+        if exc.errno != errno.ENAMETOOLONG:
+            raise
+        url_hash = hashlib.sha1(download_url.encode("utf-8")).hexdigest()[:12]
+        short_name = f"download_{url_hash}.bin"
+        destination = input_dir / short_name
+        log(f"[DOWNLOAD] Filename too long; retrying as: {short_name}")
+        with urllib.request.urlopen(download_url, timeout=120) as response, destination.open("wb") as out_file:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                out_file.write(chunk)
+        log(f"[DOWNLOAD] Saved to: {destination}")
+        return destination
 
 
 def resolve_output_subfolder(media_root: Path, subfolder: str) -> Path:
@@ -592,19 +604,30 @@ def resolve_output_subfolder(media_root: Path, subfolder: str) -> Path:
     return candidate
 
 
+def resolve_tv_destination(tv_base_root: Path, subfolder: str) -> Path:
+    clean_subfolder = subfolder.strip().replace("\\", "/").strip("/")
+    lower = clean_subfolder.lower()
+    if lower.startswith("tv shows/"):
+        clean_subfolder = clean_subfolder[9:]
+    elif lower == "tv shows":
+        clean_subfolder = ""
+    elif lower.startswith("tv/"):
+        clean_subfolder = clean_subfolder[3:]
+    elif lower == "tv":
+        clean_subfolder = ""
+    return resolve_output_subfolder(tv_base_root, clean_subfolder)
+
+
 def run_pipeline(params: dict[str, object], log: Callable[[str], None]) -> None:
-    mode = str(params["mode"])
     input_root = Path(DEFAULT_DOWNLOAD_DIR).resolve()
     media_root = Path(DEFAULT_MEDIA_DIR).resolve()
-    movies_subfolder = str(params["movies_subfolder"])
-    tv_subfolder = str(params["tv_subfolder"])
     download_type = str(params["download_type"])
     movie_final_name = str(params["movie_final_name"]).strip()
     tv_download_subfolder = str(params["tv_download_subfolder"]).strip()
-    movies_output_root = resolve_output_subfolder(media_root, movies_subfolder)
-    tv_output_root = resolve_output_subfolder(media_root, tv_subfolder)
+    movies_output_root = resolve_output_subfolder(media_root, MOVIES_OUTPUT_DIRNAME)
+    tv_base_output_root = resolve_output_subfolder(media_root, TV_OUTPUT_DIRNAME)
+    tv_output_root = resolve_tv_destination(tv_base_output_root, tv_download_subfolder)
     download_url = str(params["download_url"]).strip()
-    download_name = str(params["download_name"]).strip()
     overwrite = bool(params["overwrite"])
     delete_after_clean = bool(params["delete_after_clean"])
 
@@ -613,7 +636,7 @@ def run_pipeline(params: dict[str, object], log: Callable[[str], None]) -> None:
     movies_output_root.mkdir(parents=True, exist_ok=True)
     tv_output_root.mkdir(parents=True, exist_ok=True)
 
-    log(f"[START] Mode: {mode}")
+    log(f"[START] Download type: {download_type}")
     log(f"[START] Download/input root: {input_root}")
     log(f"[START] Media/output root: {media_root}")
     log(f"[START] Movies output: {movies_output_root}")
@@ -623,22 +646,25 @@ def run_pipeline(params: dict[str, object], log: Callable[[str], None]) -> None:
     downloaded_movie_override: Path | None = None
     downloaded_tv_override_root: Path | None = None
     if download_url:
-        downloaded_file = download_to_input(download_url, download_name, input_root, log)
+        downloaded_file = download_to_input(download_url, input_root, log)
         if download_type == "movie":
-            final_name = normalized_final_mkv_name(movie_final_name, downloaded_file.stem or "movie")
+            final_name = normalized_final_name(
+                name=movie_final_name,
+                fallback_stem=downloaded_file.stem or "movie",
+                fallback_suffix=downloaded_file.suffix or ".mkv",
+            )
             downloaded_movie_override = movies_output_root / final_name
             log(f"[DOWNLOAD] Movie final output name: {downloaded_movie_override}")
-        elif download_type == "tv" and tv_download_subfolder:
-            downloaded_tv_override_root = resolve_output_subfolder(media_root, tv_download_subfolder)
-            downloaded_tv_override_root.mkdir(parents=True, exist_ok=True)
-            log(f"[DOWNLOAD] TV output override for this download: {downloaded_tv_override_root}")
+        elif download_type == "tv":
+            downloaded_tv_override_root = tv_output_root
+            log(f"[DOWNLOAD] TV output destination: {downloaded_tv_override_root}")
 
     mkvmerge_bin, mkvpropedit_bin = resolve_tools()
     total = 0
     cleaned = 0
     skipped = 0
 
-    if mode in {"movies", "both"}:
+    if download_type == "movie":
         log("[MOVIES] Scanning media files from input folder.")
         movie_files = find_media_files(input_root)
         if not movie_files:
@@ -661,8 +687,8 @@ def run_pipeline(params: dict[str, object], log: Callable[[str], None]) -> None:
             else:
                 skipped += 1
 
-    if mode in {"tv", "both"}:
-        if downloaded_file and download_type == "tv" and downloaded_file.suffix.lower() in MEDIA_EXTENSIONS:
+    if download_type == "tv":
+        if downloaded_file and downloaded_file.suffix.lower() in MEDIA_EXTENSIONS:
             log("[TV] Downloaded TV item is a single media file (episode).")
             total += 1
             ok = clean_file_to_output(
@@ -771,19 +797,12 @@ def index():
 
 @app.post("/start")
 def start_job():
-    mode = request.form.get("mode", "movies").strip().lower()
-    if mode not in {"movies", "tv", "both"}:
-        mode = "movies"
     download_type = request.form.get("download_type", "movie").strip().lower()
     if download_type not in {"movie", "tv"}:
         download_type = "movie"
 
     params: dict[str, object] = {
-        "mode": mode,
-        "movies_subfolder": request.form.get("movies_subfolder", "movies").strip() or "movies",
-        "tv_subfolder": request.form.get("tv_subfolder", "tv").strip() or "tv",
         "download_url": request.form.get("download_url", "").strip(),
-        "download_name": request.form.get("download_name", "").strip(),
         "download_type": download_type,
         "movie_final_name": request.form.get("movie_final_name", "").strip(),
         "tv_download_subfolder": request.form.get("tv_download_subfolder", "").strip(),
