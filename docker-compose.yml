@@ -7,7 +7,6 @@ services:
     restart: unless-stopped
     environment:
       MEDIA_DIR: /data/movies
-      POLL_SECONDS: "15"
       STABLE_WAIT_SECONDS: "5"
       KEEP_ENGLISH_ONLY: "true"
       OVERWRITE_OUTPUT: "false"
@@ -22,7 +21,6 @@ services:
     restart: unless-stopped
     environment:
       MEDIA_DIR: /data/tv
-      POLL_SECONDS: "15"
       STABLE_WAIT_SECONDS: "5"
       KEEP_ENGLISH_ONLY: "true"
       OVERWRITE_OUTPUT: "false"

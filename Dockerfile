@@ -4,7 +4,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends mkvtoolnix ca-certificates \
+    && apt-get install -y --no-install-recommends mkvtoolnix inotify-tools ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

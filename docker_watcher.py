@@ -41,6 +41,35 @@ def run_command(cmd: list[str]) -> tuple[int, str, str]:
     return proc.returncode, proc.stdout, proc.stderr
 
 
+def watch_media_events(media_root: Path):
+    inotifywait = shutil.which("inotifywait")
+    if not inotifywait:
+        raise RuntimeError("inotifywait not found in PATH. Expected inotify-tools in the container.")
+
+    cmd = [
+        inotifywait,
+        "-m",
+        "-r",
+        "-e",
+        "close_write,moved_to,create",
+        "--format",
+        "%w%f",
+        str(media_root),
+    ]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if proc.stdout is None:
+        raise RuntimeError("Failed to read inotifywait output stream.")
+
+    while True:
+        line = proc.stdout.readline()
+        if line == "":
+            err = ""
+            if proc.stderr is not None:
+                err = proc.stderr.read().strip()
+            raise RuntimeError(f"inotifywait stopped unexpectedly: {err or 'no stderr output'}")
+        yield Path(line.strip())
+
+
 def load_state(state_path: Path) -> dict[str, dict[str, int]]:
     if not state_path.exists():
         return {}
@@ -164,7 +193,7 @@ def clean_file(
         print(f"[SKIP] Destination exists: {dest_file}")
         return False
 
-    tmp_fd, tmp_name = tempfile.mkstemp(prefix=f"{source_file.stem}.", suffix=".mkv", dir=str(dest_file.parent))
+    tmp_fd, tmp_name = tempfile.mkstemp(prefix=f"{source_file.stem}.", suffix=".tmp.mkv", dir=str(dest_file.parent))
     os.close(tmp_fd)
     tmp_output = Path(tmp_name)
 
@@ -223,21 +252,9 @@ def clean_file(
         return False
 
 
-def find_media_files(root: Path) -> list[Path]:
-    results: list[Path] = []
-    for dirpath, _, filenames in os.walk(root):
-        base = Path(dirpath)
-        for name in filenames:
-            p = base / name
-            if p.suffix.lower() in MEDIA_EXTENSIONS:
-                results.append(p)
-    return results
-
-
 def main() -> int:
     media_root = Path(os.environ.get("MEDIA_DIR", "/data")).resolve()
     config_root = Path(os.environ.get("CONFIG_DIR", "/config")).resolve()
-    poll_seconds = int(os.environ.get("POLL_SECONDS", "15"))
     stable_wait_seconds = int(os.environ.get("STABLE_WAIT_SECONDS", "5"))
     keep_english_only = env_bool("KEEP_ENGLISH_ONLY", True)
     overwrite = env_bool("OVERWRITE_OUTPUT", False)
@@ -253,17 +270,24 @@ def main() -> int:
     mkvmerge_bin, mkvpropedit_bin = resolve_tools()
     print(f"[START] Media:    {media_root}")
     print(f"[START] Config:   {config_root}")
-    print(f"[START] Poll:     {poll_seconds}s")
+    print("[START] Mode:     event-driven (inotify)")
+    print("[START] Startup:  no initial full-library scan")
 
     while True:
         try:
-            media_files = find_media_files(media_root)
-            if media_files:
-                print(f"[SCAN] Found {len(media_files)} candidate file(s).")
-            for file_path in media_files:
+            for file_path in watch_media_events(media_root):
                 if not file_path.exists():
                     continue
-                rel_key = str(file_path.relative_to(media_root).as_posix())
+                if not file_path.is_file():
+                    continue
+                if file_path.name.endswith(".tmp.mkv"):
+                    continue
+                if file_path.suffix.lower() not in MEDIA_EXTENSIONS:
+                    continue
+                try:
+                    rel_key = str(file_path.relative_to(media_root).as_posix())
+                except ValueError:
+                    continue
                 current_sig = file_signature(file_path)
                 if current_sig is not None and processed_state.get(rel_key) == current_sig:
                     continue
@@ -288,13 +312,12 @@ def main() -> int:
                             save_state(state_path, processed_state)
                 except Exception as exc:
                     print(f"[ERROR] Unexpected failure for {file_path}: {exc}")
-            time.sleep(poll_seconds)
         except KeyboardInterrupt:
             print("[STOP] Interrupted.")
             return 0
         except Exception as exc:
             print(f"[ERROR] Loop failure: {exc}")
-            time.sleep(poll_seconds)
+            time.sleep(3)
 
 
 if __name__ == "__main__":
