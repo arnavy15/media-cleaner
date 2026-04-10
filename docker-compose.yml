@@ -2,33 +2,33 @@ version: "3.9"
 
 services:
   media-cleaner-movies:
-    build: .
+    image: ghcr.io/arnavy15/media-cleaner:latest
     container_name: media-cleaner-movies
     restart: unless-stopped
     environment:
-      SOURCE_DIR: /data/movies/in
-      DEST_DIR: /data/movies/out
-      POLL_SECONDS: 15
-      STABLE_WAIT_SECONDS: 5
+      SOURCE_DIR: /data/movies
+      DEST_DIR: /data/movies
+      POLL_SECONDS: "15"
+      STABLE_WAIT_SECONDS: "5"
       KEEP_ENGLISH_ONLY: "true"
       OVERWRITE_OUTPUT: "false"
       CONFIG_DIR: /config/movies
     volumes:
-      - /path/on/server/media-cleaner-config:/config
-      - /path/on/server/media-cleaner-data:/data
+      - /your/server/config:/config
+      - /your/server/data:/data
 
   media-cleaner-tv:
-    build: .
+    image: ghcr.io/arnavy15/media-cleaner:latest
     container_name: media-cleaner-tv
     restart: unless-stopped
     environment:
-      SOURCE_DIR: /data/tv/in
-      DEST_DIR: /data/tv/out
-      POLL_SECONDS: 15
-      STABLE_WAIT_SECONDS: 5
+      SOURCE_DIR: /data/tv
+      DEST_DIR: /data/tv
+      POLL_SECONDS: "15"
+      STABLE_WAIT_SECONDS: "5"
       KEEP_ENGLISH_ONLY: "true"
       OVERWRITE_OUTPUT: "false"
       CONFIG_DIR: /config/tv
     volumes:
-      - /path/on/server/media-cleaner-config:/config
-      - /path/on/server/media-cleaner-data:/data
+      - /your/server/config:/config
+      - /your/server/data:/data

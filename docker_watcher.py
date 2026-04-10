@@ -129,9 +129,10 @@ def clean_file(
     selected_audio = pick_audio_track(audios, english_audios, keep_english_only)
     rel_path = source_file.relative_to(source_root)
     dest_file = (dest_root / rel_path).with_suffix(".mkv")
+    is_in_place_target = source_file == dest_file
     dest_file.parent.mkdir(parents=True, exist_ok=True)
 
-    if dest_file.exists() and not overwrite:
+    if dest_file.exists() and not overwrite and not is_in_place_target:
         print(f"[SKIP] Destination exists: {dest_file}")
         return False
 
@@ -175,11 +176,15 @@ def clean_file(
     run_command(propedit_cmd)
 
     try:
-        if dest_file.exists() and overwrite:
+        if dest_file.exists() and overwrite and not is_in_place_target:
             dest_file.unlink()
         os.replace(tmp_output, dest_file)
-        source_file.unlink()
-        print(f"[OK] Moved cleaned file to: {dest_file}")
+        if not is_in_place_target and source_file.exists():
+            source_file.unlink()
+        if is_in_place_target:
+            print(f"[OK] Replaced file in place: {dest_file}")
+        else:
+            print(f"[OK] Moved cleaned file to: {dest_file}")
         return True
     except OSError as exc:
         print(f"[ERROR] Finalize failed: {exc}")
