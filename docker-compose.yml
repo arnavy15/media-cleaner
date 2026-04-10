@@ -1,6 +1,6 @@
 services:
   media-cleaner-web:
-    image: ghcr.io/arnavy15/media-cleaner:1.0.1
+    image: ghcr.io/arnavy15/media-cleaner:latest
     container_name: media-cleaner
     restart: unless-stopped
     ports:

@@ -16,6 +16,7 @@ import zipfile
 import hashlib
 import re
 import errno
+import mimetypes
 from pathlib import Path
 from typing import Callable
 
@@ -247,7 +248,7 @@ PAGE_TEMPLATE = """
     <div class="hero">
       <h1>Media Cleaner Control Panel</h1>
       <p>Download, clean, and route files with live progress tracking.</p>
-      <span class="chip">v{{ app_version }} · MKVToolNix Only</span>
+      <span class="chip">v{{ app_version }} | MKVToolNix Only</span>
     </div>
     <div class="card">
       <h2>Pipeline Settings</h2>
@@ -589,7 +590,7 @@ def safe_extract_zip(zip_path: Path, target_dir: Path) -> None:
 
 def extract_tv_zips(input_dir: Path, log: Callable[[str], None]) -> list[tuple[Path, Path]]:
     extracted_roots: list[tuple[Path, Path]] = []
-    zip_files = sorted(input_dir.rglob("*.zip"))
+    zip_files = sorted(p for p in input_dir.rglob("*") if p.is_file() and is_zip_payload(p))
     if not zip_files:
         log("[ZIP] No season ZIP files found.")
         return extracted_roots
@@ -621,6 +622,26 @@ def find_media_files(root: Path, skip_dirs: set[Path] | None = None) -> list[Pat
     return files
 
 
+def is_zip_payload(file_path: Path) -> bool:
+    if file_path.suffix.lower() == ".zip":
+        return True
+    try:
+        return zipfile.is_zipfile(file_path)
+    except OSError:
+        return False
+
+
+def is_media_payload(file_path: Path, mkvmerge_bin: str) -> bool:
+    if file_path.suffix.lower() in MEDIA_EXTENSIONS:
+        return True
+    try:
+        info = probe_tracks(file_path, mkvmerge_bin)
+    except Exception:
+        return False
+    videos, _, _ = analyze_tracks(info)
+    return bool(videos)
+
+
 def safe_download_filename(download_url: str) -> str:
     parsed = urllib.parse.urlparse(download_url)
     raw_path_name = Path(parsed.path).name
@@ -636,6 +657,65 @@ def safe_download_filename(download_url: str) -> str:
         ext = suffix if suffix and len(suffix) <= 10 else (inferred_suffix if len(inferred_suffix) <= 10 else "")
         candidate = f"download_{url_hash}{ext}"
     return candidate
+
+
+def sanitize_download_name(name: str) -> str:
+    candidate = Path(name).name
+    candidate = re.sub(r"[^A-Za-z0-9._\\- ()\\[\\]]+", "_", candidate).strip(" .")
+    if not candidate:
+        return "downloaded_media"
+    if len(candidate) > 120:
+        stem = Path(candidate).stem[:100].rstrip(" .") or "downloaded_media"
+        suffix = Path(candidate).suffix[:10]
+        return f"{stem}{suffix}"
+    return candidate
+
+
+def infer_extension_from_headers(response) -> str:
+    content_disposition = response.headers.get("Content-Disposition", "")
+    disposition_match = re.search(r'filename\\*?=(?:UTF-8\'\')?"?([^\";]+)"?', content_disposition, re.IGNORECASE)
+    if disposition_match:
+        header_name = urllib.parse.unquote(disposition_match.group(1).strip())
+        header_suffix = Path(header_name).suffix.lower()
+        if header_suffix:
+            return header_suffix
+
+    content_type = response.headers.get_content_type()
+    extension = mimetypes.guess_extension(content_type or "")
+    if extension == ".ksh":
+        return ".mkv"
+    if extension:
+        return extension
+
+    return ""
+
+
+def maybe_relabel_downloaded_file(file_path: Path, mkvmerge_bin: str, status: Callable[[str], None]) -> Path:
+    current_suffix = file_path.suffix.lower()
+    if current_suffix and current_suffix not in {".bin", ".file"}:
+        return file_path
+
+    target_suffix = ""
+    if is_zip_payload(file_path):
+        target_suffix = ".zip"
+    elif is_media_payload(file_path, mkvmerge_bin):
+        target_suffix = ".mkv"
+
+    if not target_suffix:
+        return file_path
+
+    renamed_path = file_path.with_suffix(target_suffix)
+    if renamed_path == file_path:
+        return file_path
+
+    counter = 1
+    while renamed_path.exists():
+        renamed_path = file_path.with_name(f"{file_path.stem}_{counter}{target_suffix}")
+        counter += 1
+
+    file_path.rename(renamed_path)
+    status(f"Detected payload type, renamed download to: {renamed_path.name}")
+    return renamed_path
 
 
 def normalized_final_name(name: str, fallback_stem: str, fallback_suffix: str) -> str:
@@ -662,39 +742,46 @@ def format_bytes(num_bytes: int) -> str:
 def download_to_input(
     download_url: str,
     input_dir: Path,
+    mkvmerge_bin: str,
     status: Callable[[str], None],
     download_progress: Callable[[dict], None],
 ) -> Path:
-    final_name = safe_download_filename(download_url)
-    destination = input_dir / final_name
+    initial_name = safe_download_filename(download_url)
+    destination = input_dir / initial_name
     destination.parent.mkdir(parents=True, exist_ok=True)
 
-    status(f"Starting download: {final_name}")
+    status(f"Starting download: {initial_name}")
     try:
-        with urllib.request.urlopen(download_url, timeout=120) as response, destination.open("wb") as out_file:
-            total_raw = response.headers.get("Content-Length")
-            total = int(total_raw) if total_raw and total_raw.isdigit() else 0
-            downloaded = 0
-            download_progress({
-                "percent": 0,
-                "filename": destination.name,
-                "status": "Download started",
-            })
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                out_file.write(chunk)
-                downloaded += len(chunk)
-                percent = (downloaded / total * 100.0) if total > 0 else 0.0
-                status_text = f"{format_bytes(downloaded)} downloaded"
-                if total > 0:
-                    status_text = f"{format_bytes(downloaded)} / {format_bytes(total)}"
+        with urllib.request.urlopen(download_url, timeout=120) as response:
+            if not Path(initial_name).suffix:
+                inferred_suffix = infer_extension_from_headers(response)
+                if inferred_suffix:
+                    destination = input_dir / sanitize_download_name(f"{Path(initial_name).name}{inferred_suffix}")
+            with destination.open("wb") as out_file:
+                total_raw = response.headers.get("Content-Length")
+                total = int(total_raw) if total_raw and total_raw.isdigit() else 0
+                downloaded = 0
                 download_progress({
-                    "percent": percent,
+                    "percent": 0,
                     "filename": destination.name,
-                    "status": status_text,
+                    "status": "Download started",
                 })
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    out_file.write(chunk)
+                    downloaded += len(chunk)
+                    percent = (downloaded / total * 100.0) if total > 0 else 0.0
+                    status_text = f"{format_bytes(downloaded)} downloaded"
+                    if total > 0:
+                        status_text = f"{format_bytes(downloaded)} / {format_bytes(total)}"
+                    download_progress({
+                        "percent": percent,
+                        "filename": destination.name,
+                        "status": status_text,
+                    })
+        destination = maybe_relabel_downloaded_file(destination, mkvmerge_bin, status)
         download_progress({
             "percent": 100,
             "filename": destination.name,
@@ -733,6 +820,7 @@ def download_to_input(
                     "filename": destination.name,
                     "status": status_text,
                 })
+        destination = maybe_relabel_downloaded_file(destination, mkvmerge_bin, status)
         download_progress({
             "percent": 100,
             "filename": destination.name,
@@ -790,6 +878,8 @@ def run_pipeline(
     movies_output_root.mkdir(parents=True, exist_ok=True)
     tv_output_root.mkdir(parents=True, exist_ok=True)
 
+    mkvmerge_bin, mkvpropedit_bin = resolve_tools()
+
     overall_progress(2, "Preparing pipeline")
     status("Pipeline started")
 
@@ -798,7 +888,7 @@ def run_pipeline(
     downloaded_tv_override_root: Path | None = None
     if download_url:
         overall_progress(5, "Downloading input")
-        downloaded_file = download_to_input(download_url, input_root, status, download_progress)
+        downloaded_file = download_to_input(download_url, input_root, mkvmerge_bin, status, download_progress)
         if download_type == "movie":
             final_name = normalized_final_name(
                 name=movie_final_name,
@@ -813,8 +903,6 @@ def run_pipeline(
         overall_progress(25, "Download completed")
     else:
         overall_progress(20, "No download selected")
-
-    mkvmerge_bin, mkvpropedit_bin = resolve_tools()
     total = 0
     cleaned = 0
     skipped = 0
@@ -824,13 +912,18 @@ def run_pipeline(
 
     if download_type == "movie":
         status("Scanning movie files")
+        if downloaded_file is not None and is_media_payload(downloaded_file, mkvmerge_bin):
+            override = downloaded_movie_override
+            files_to_process.append((downloaded_file, downloaded_file.parent, movies_output_root, override))
         movie_files = find_media_files(input_root)
         for media_file in movie_files:
+            if downloaded_file is not None and media_file.resolve() == downloaded_file.resolve():
+                continue
             override = downloaded_movie_override if downloaded_file and media_file.resolve() == downloaded_file.resolve() else None
             files_to_process.append((media_file, input_root, movies_output_root, override))
 
     if download_type == "tv":
-        if downloaded_file and downloaded_file.suffix.lower() in MEDIA_EXTENSIONS:
+        if downloaded_file and is_media_payload(downloaded_file, mkvmerge_bin):
             status("Downloaded TV item is a single episode file")
             files_to_process.append((downloaded_file, downloaded_file.parent, downloaded_tv_override_root or tv_output_root, None))
         else:
