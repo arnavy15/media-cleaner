@@ -174,6 +174,19 @@ PAGE_TEMPLATE = """
       color: #bfd0ea;
       font-size: 0.92rem;
     }
+    .download-list {
+      display: grid;
+      gap: 8px;
+    }
+    .download-url-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+    }
+    .download-url-row:first-child {
+      grid-template-columns: minmax(0, 1fr);
+    }
     .actions {
       margin-top: 4px;
       display: flex;
@@ -194,6 +207,21 @@ PAGE_TEMPLATE = """
     }
     button:hover { transform: translateY(-1px); }
     button[disabled] { opacity: 0.6; cursor: not-allowed; }
+    .secondary-btn {
+      margin-top: 8px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: rgba(15, 23, 42, 0.78);
+      color: var(--text);
+      box-shadow: none;
+    }
+    .remove-download-btn {
+      border-radius: 8px;
+      padding: 11px 13px;
+      background: rgba(148, 163, 184, 0.14);
+      color: var(--text);
+      box-shadow: none;
+    }
     .progress-panel {
       margin-top: 14px;
       border: 1px solid var(--border);
@@ -269,13 +297,18 @@ PAGE_TEMPLATE = """
             </select>
           </div>
           <div class="full">
-            <label for="download_url">Download URL (optional)</label>
-            <input id="download_url" name="download_url" value="" placeholder="https://..." />
+            <label for="download_url_0">Download URLs (optional)</label>
+            <div id="download-url-list" class="download-list">
+              <div class="download-url-row">
+                <input id="download_url_0" name="download_url" value="" placeholder="https://..." />
+              </div>
+            </div>
+            <button id="add-download-btn" class="secondary-btn" type="button">Download Another</button>
           </div>
           <div class="full" id="movie-name-wrap">
             <label for="movie_final_name">Movie Final File Name (inside /media/Movies)</label>
             <input id="movie_final_name" name="movie_final_name" value="" placeholder="Movie Title (2026)" />
-            <div class="subnote">No extension needed. Original extension is reused.</div>
+            <div class="subnote">No extension needed. Used when one movie URL is submitted.</div>
           </div>
           <div class="full" id="tv-dest-wrap" style="display:none;">
             <label for="tv_download_subfolder">TV Download Destination (inside /media/TV Shows)</label>
@@ -314,6 +347,8 @@ PAGE_TEMPLATE = """
     const form = document.getElementById("pipeline-form");
     const runBtn = document.getElementById("run-btn");
     const downloadType = document.getElementById("download_type");
+    const downloadUrlList = document.getElementById("download-url-list");
+    const addDownloadBtn = document.getElementById("add-download-btn");
     const movieNameWrap = document.getElementById("movie-name-wrap");
     const tvDestWrap = document.getElementById("tv-dest-wrap");
     const overallBar = document.getElementById("overall-bar");
@@ -324,6 +359,7 @@ PAGE_TEMPLATE = """
     const downloadLabel = document.getElementById("download-label");
     const statusLine = document.getElementById("status-line");
     let stream = null;
+    let downloadUrlCounter = 1;
 
     function setOverall(percent, text) {
       const clamped = Math.max(0, Math.min(100, Number(percent || 0)));
@@ -345,6 +381,29 @@ PAGE_TEMPLATE = """
       downloadRow.style.display = "none";
     }
 
+    function addDownloadField() {
+      const index = downloadUrlCounter;
+      downloadUrlCounter += 1;
+      const row = document.createElement("div");
+      row.className = "download-url-row";
+
+      const input = document.createElement("input");
+      input.id = `download_url_${index}`;
+      input.name = "download_url";
+      input.placeholder = "https://...";
+      row.appendChild(input);
+
+      const removeBtn = document.createElement("button");
+      removeBtn.className = "remove-download-btn";
+      removeBtn.type = "button";
+      removeBtn.textContent = "Remove";
+      removeBtn.addEventListener("click", () => row.remove());
+      row.appendChild(removeBtn);
+
+      downloadUrlList.appendChild(row);
+      input.focus();
+    }
+
     function refreshDownloadFields() {
       if (downloadType.value === "tv") {
         movieNameWrap.style.display = "none";
@@ -355,6 +414,7 @@ PAGE_TEMPLATE = """
       }
     }
     downloadType.addEventListener("change", refreshDownloadFields);
+    addDownloadBtn.addEventListener("click", addDownloadField);
     refreshDownloadFields();
 
     form.addEventListener("submit", async (event) => {
@@ -676,6 +736,18 @@ def sanitize_download_name(name: str) -> str:
     return candidate
 
 
+def unique_download_path(destination: Path) -> Path:
+    if not destination.exists():
+        return destination
+
+    counter = 1
+    while True:
+        candidate = destination.with_name(f"{destination.stem}_{counter}{destination.suffix}")
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
+
 def infer_extension_from_headers(response) -> str:
     content_disposition = response.headers.get("Content-Disposition", "")
     disposition_match = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?', content_disposition, re.IGNORECASE)
@@ -752,7 +824,7 @@ def download_to_input(
     download_progress: Callable[[dict], None],
 ) -> Path:
     initial_name = safe_download_filename(download_url)
-    destination = input_dir / initial_name
+    destination = unique_download_path(input_dir / initial_name)
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     status(f"Starting download: {initial_name}")
@@ -761,7 +833,8 @@ def download_to_input(
             if not Path(initial_name).suffix:
                 inferred_suffix = infer_extension_from_headers(response)
                 if inferred_suffix:
-                    destination = input_dir / sanitize_download_name(f"{Path(initial_name).name}{inferred_suffix}")
+                    inferred_name = sanitize_download_name(f"{Path(initial_name).name}{inferred_suffix}")
+                    destination = unique_download_path(input_dir / inferred_name)
             with destination.open("wb") as out_file:
                 total_raw = response.headers.get("Content-Length")
                 total = int(total_raw) if total_raw and total_raw.isdigit() else 0
@@ -799,7 +872,7 @@ def download_to_input(
             raise
         url_hash = hashlib.sha1(download_url.encode("utf-8")).hexdigest()[:12]
         short_name = f"download_{url_hash}.bin"
-        destination = input_dir / short_name
+        destination = unique_download_path(input_dir / short_name)
         status(f"Filename too long, retrying as: {short_name}")
         with urllib.request.urlopen(download_url, timeout=120) as response, destination.open("wb") as out_file:
             total_raw = response.headers.get("Content-Length")
@@ -874,7 +947,12 @@ def run_pipeline(
     movies_output_root = resolve_output_subfolder(media_root, MOVIES_OUTPUT_DIRNAME)
     tv_base_output_root = resolve_output_subfolder(media_root, TV_OUTPUT_DIRNAME)
     tv_output_root = resolve_tv_destination(tv_base_output_root, tv_download_subfolder)
-    download_url = str(params["download_url"]).strip()
+    raw_download_urls = params.get("download_urls", [])
+    if isinstance(raw_download_urls, list):
+        download_urls = [str(url).strip() for url in raw_download_urls if str(url).strip()]
+    else:
+        download_url = str(params.get("download_url", "")).strip()
+        download_urls = [download_url] if download_url else []
     overwrite = bool(params["overwrite"])
     delete_after_clean = bool(params["delete_after_clean"])
 
@@ -888,13 +966,20 @@ def run_pipeline(
     overall_progress(2, "Preparing pipeline")
     status("Pipeline started")
 
-    downloaded_file: Path | None = None
+    downloaded_files: list[Path] = []
     downloaded_movie_override: Path | None = None
     downloaded_tv_override_root: Path | None = None
-    if download_url:
-        overall_progress(5, "Downloading input")
-        downloaded_file = download_to_input(download_url, input_root, mkvmerge_bin, status, download_progress)
-        if download_type == "movie":
+    if download_urls:
+        download_total = len(download_urls)
+        overall_progress(5, f"Downloading {download_total} input file(s)")
+        for index, download_url in enumerate(download_urls, start=1):
+            status(f"Downloading input {index}/{download_total}")
+            downloaded_file = download_to_input(download_url, input_root, mkvmerge_bin, status, download_progress)
+            downloaded_files.append(downloaded_file)
+            progress = 5.0 + (index / download_total) * 20.0
+            overall_progress(progress, f"Downloaded {index}/{download_total}")
+        if download_type == "movie" and len(downloaded_files) == 1:
+            downloaded_file = downloaded_files[0]
             final_name = normalized_final_name(
                 name=movie_final_name,
                 fallback_stem=downloaded_file.stem or "movie",
@@ -914,31 +999,43 @@ def run_pipeline(
     processed = 0
 
     files_to_process: list[tuple[Path, Path, Path, Path | None]] = []
+    downloaded_file_paths = {downloaded_file.resolve() for downloaded_file in downloaded_files}
 
     if download_type == "movie":
         status("Scanning movie files")
-        if downloaded_file is not None and is_media_payload(downloaded_file, mkvmerge_bin):
-            override = downloaded_movie_override
-            files_to_process.append((downloaded_file, downloaded_file.parent, movies_output_root, override))
+        for downloaded_file in downloaded_files:
+            if is_media_payload(downloaded_file, mkvmerge_bin):
+                override = downloaded_movie_override if len(downloaded_files) == 1 else None
+                files_to_process.append((downloaded_file, downloaded_file.parent, movies_output_root, override))
         movie_files = find_media_files(input_root)
         for media_file in movie_files:
-            if downloaded_file is not None and media_file.resolve() == downloaded_file.resolve():
+            if media_file.resolve() in downloaded_file_paths:
                 continue
-            override = downloaded_movie_override if downloaded_file and media_file.resolve() == downloaded_file.resolve() else None
-            files_to_process.append((media_file, input_root, movies_output_root, override))
+            files_to_process.append((media_file, input_root, movies_output_root, None))
 
     if download_type == "tv":
-        if downloaded_file and is_media_payload(downloaded_file, mkvmerge_bin):
-            status("Downloaded TV item is a single episode file")
+        downloaded_media_files = [
+            downloaded_file
+            for downloaded_file in downloaded_files
+            if is_media_payload(downloaded_file, mkvmerge_bin)
+        ]
+        downloaded_zip_files = [
+            downloaded_file
+            for downloaded_file in downloaded_files
+            if is_zip_payload(downloaded_file)
+        ]
+        for downloaded_file in downloaded_media_files:
+            status(f"Downloaded TV item is an episode file: {downloaded_file.name}")
             files_to_process.append((downloaded_file, downloaded_file.parent, downloaded_tv_override_root or tv_output_root, None))
-        else:
+
+        if downloaded_zip_files or not downloaded_media_files:
             status("Extracting TV ZIP files (if present)")
             extracted = extract_tv_zips(input_root, status)
             tv_root_targets: list[tuple[Path, Path]] = []
             if extracted:
                 for zip_path, season_root in extracted:
                     root_target = tv_output_root
-                    if downloaded_file and zip_path == downloaded_file.resolve() and downloaded_tv_override_root is not None:
+                    if zip_path in downloaded_file_paths and downloaded_tv_override_root is not None:
                         root_target = downloaded_tv_override_root
                     tv_root_targets.append((season_root, root_target))
             else:
@@ -951,10 +1048,13 @@ def run_pipeline(
 
     total = len(files_to_process)
     if total == 0:
-        if downloaded_file is not None:
+        if downloaded_files:
             message = "Downloaded file was not recognized."
+            if len(downloaded_files) > 1:
+                message = "Downloaded files were not recognized."
+            names = ", ".join(downloaded_file.name for downloaded_file in downloaded_files)
             status(
-                f"Downloaded file was saved as {downloaded_file.name}, "
+                f"Downloaded file(s) saved as {names}, "
                 "but it was not detected as a valid media file or zip archive."
             )
             overall_progress(100, message)
@@ -1055,9 +1155,10 @@ def start_job():
     download_type = request.form.get("download_type", "movie").strip().lower()
     if download_type not in {"movie", "tv"}:
         download_type = "movie"
+    download_urls = [url.strip() for url in request.form.getlist("download_url") if url.strip()]
 
     params: dict[str, object] = {
-        "download_url": request.form.get("download_url", "").strip(),
+        "download_urls": download_urls,
         "download_type": download_type,
         "movie_final_name": request.form.get("movie_final_name", "").strip(),
         "tv_download_subfolder": request.form.get("tv_download_subfolder", "").strip(),
