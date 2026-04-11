@@ -666,7 +666,7 @@ def safe_download_filename(download_url: str) -> str:
 
 def sanitize_download_name(name: str) -> str:
     candidate = Path(name).name
-    candidate = re.sub(r"[^A-Za-z0-9._\\- ()\\[\\]]+", "_", candidate).strip(" .")
+    candidate = re.sub(r"[^A-Za-z0-9._\- ()\[\]]+", "_", candidate).strip(" .")
     if not candidate:
         return "downloaded_media"
     if len(candidate) > 120:
@@ -678,7 +678,7 @@ def sanitize_download_name(name: str) -> str:
 
 def infer_extension_from_headers(response) -> str:
     content_disposition = response.headers.get("Content-Disposition", "")
-    disposition_match = re.search(r'filename\\*?=(?:UTF-8\'\')?"?([^\";]+)"?', content_disposition, re.IGNORECASE)
+    disposition_match = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?', content_disposition, re.IGNORECASE)
     if disposition_match:
         header_name = urllib.parse.unquote(disposition_match.group(1).strip())
         header_suffix = Path(header_name).suffix.lower()
