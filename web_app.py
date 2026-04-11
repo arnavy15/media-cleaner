@@ -401,8 +401,13 @@ PAGE_TEMPLATE = """
           const data = JSON.parse(evt.data || "{}");
           setDownload(data);
         });
-        stream.addEventListener("done", () => {
-          setOverall(100, "Pipeline complete.");
+        stream.addEventListener("done", (evt) => {
+          const data = JSON.parse(evt.data || "{}");
+          if (data.success) {
+            setOverall(100, data.message || "Pipeline complete.");
+          } else {
+            statusLine.textContent = data.message || "Pipeline failed.";
+          }
           hideDownload();
           runBtn.disabled = false;
           runBtn.textContent = "Run Pipeline";
@@ -860,7 +865,7 @@ def run_pipeline(
     status: Callable[[str], None],
     overall_progress: Callable[[float, str], None],
     download_progress: Callable[[dict], None],
-) -> None:
+) -> tuple[bool, str]:
     input_root = Path(DEFAULT_DOWNLOAD_DIR).resolve()
     media_root = Path(DEFAULT_MEDIA_DIR).resolve()
     download_type = str(params["download_type"])
@@ -946,9 +951,19 @@ def run_pipeline(
 
     total = len(files_to_process)
     if total == 0:
-        overall_progress(100, "No media files found")
-        status("No media files found to clean")
-        return
+        if downloaded_file is not None:
+            message = "Downloaded file was not recognized."
+            status(
+                f"Downloaded file was saved as {downloaded_file.name}, "
+                "but it was not detected as a valid media file or zip archive."
+            )
+            overall_progress(100, message)
+            return False, message
+        else:
+            message = "No media files found to clean."
+            overall_progress(100, "No media files found")
+            status(message)
+            return True, message
 
     overall_progress(30, f"Processing {total} file(s)")
     for media_file, source_root, target_root, override in files_to_process:
@@ -972,7 +987,9 @@ def run_pipeline(
         progress = 30.0 + (processed / total) * 70.0
         overall_progress(progress, f"Processed {processed}/{total}")
 
+    message = f"Pipeline complete. Cleaned: {cleaned}, Skipped/Failed: {skipped}."
     status(f"Done. Cleaned: {cleaned}, Skipped/Failed: {skipped}")
+    return True, message
 
 
 def emit_event(job_id: str, event_name: str, payload: dict) -> None:
@@ -983,13 +1000,13 @@ def emit_event(job_id: str, event_name: str, payload: dict) -> None:
     job["queue"].put((event_name, payload))
 
 
-def mark_done(job_id: str) -> None:
+def mark_done(job_id: str, success: bool, message: str) -> None:
     with JOBS_LOCK:
         job = JOBS.get(job_id)
         if not job:
             return
         job["done"] = True
-    job["queue"].put(("done", {"message": "Pipeline complete."}))
+    job["queue"].put(("done", {"success": success, "message": message}))
 
 
 def job_runner(job_id: str, params: dict[str, object]) -> None:
@@ -1003,12 +1020,13 @@ def job_runner(job_id: str, params: dict[str, object]) -> None:
         emit_event(job_id, "download_progress", payload)
 
     try:
-        run_pipeline(params, status, overall_progress, download_progress)
+        success, message = run_pipeline(params, status, overall_progress, download_progress)
+        mark_done(job_id, success, message)
     except Exception:
+        print(traceback.format_exc(), flush=True)
         emit_event(job_id, "status", {"message": "Unhandled exception occurred."})
         emit_event(job_id, "status", {"message": traceback.format_exc()})
-    finally:
-        mark_done(job_id)
+        mark_done(job_id, False, "Pipeline failed. Check container logs for the traceback.")
 
 
 def sse_event(payload: dict, event: str) -> str:
